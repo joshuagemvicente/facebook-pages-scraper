@@ -405,6 +405,30 @@ def test_max_posts_and_since_stop_early(monkeypatch):
     assert [p["creation_time"] for p in posts] == list(range(1000, 949, -1))
 
 
+def test_until_resumes_from_an_older_post(monkeypatch):
+    timeline = [_story(str(i), 1000 - i) for i in range(95)]
+    calls = _fake_feed(monkeypatch, timeline)
+    scraper = PagePostInfo("example", max_posts=None, since=930, until=960)
+    posts = scraper.scrape()
+    assert [p["creation_time"] for p in posts] == list(range(960, 929, -1))
+    assert calls[0]["beforeTime"] == 960
+    assert scraper.complete
+
+
+def test_complete_only_when_paging_reached_the_end(monkeypatch):
+    _fake_feed(monkeypatch, [_story(str(i), 1000 - i) for i in range(95)])
+    scraper = PagePostInfo("example", max_posts=None)
+    scraper.scrape()
+    assert scraper.complete
+    capped = PagePostInfo("example", max_posts=50)
+    capped.scrape()
+    assert not capped.complete
+    monkeypatch.setattr(RequestHandler, "post_graphql", lambda *a, **k: None)
+    failed = PagePostInfo("example", max_posts=None)
+    failed.scrape()
+    assert not failed.complete
+
+
 def test_failed_feed_request_keeps_posts_so_far(monkeypatch):
     _fake_feed(monkeypatch, [_story(str(i), 1000 - i) for i in range(5)])
     monkeypatch.setattr(RequestHandler, "post_graphql", lambda *a, **k: None)

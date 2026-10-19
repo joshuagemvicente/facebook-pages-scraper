@@ -28,6 +28,7 @@ class PagePostInfo:
         max_posts: int | None = 1,
         since: datetime | date | int | float | str | None = None,
         error_log: str | None = None,
+        until: datetime | date | int | float | str | None = None,
     ):
         """
         Initializes the PagePostInfo scraper with the given Facebook page URL or username.
@@ -40,6 +41,8 @@ class PagePostInfo:
             since: Skip posts older than this date, datetime, ISO string, or unix time.
                 A datetime without a timezone is UTC.
             error_log: Optional JSON Lines file. Each failed request, rate limit, and retry adds a line.
+            until: Skip posts newer than this. Paging starts here, so a stopped run can resume
+                from its oldest post.
         """
         self.url = normalize_url(url)
         self._owns_handler = handler is None
@@ -49,6 +52,9 @@ class PagePostInfo:
         self.posts: List[Dict[str, Optional[str]]] = []
         self.max_posts = max_posts
         self.since = _unix(since)
+        self.until = _unix(until)
+        # True once paging reached since or the page's first post, not a failure or max_posts.
+        self.complete = False
 
     def scrape(self) -> Optional[List[Dict[str, Optional[str]]]]:
         """
@@ -67,7 +73,9 @@ class PagePostInfo:
             if not timeline_info_json:
                 print("No valid data found for key 'timeline_list_feed_units' in the HTML page.")
                 return None
-            pager = _Pager(self.extract_timeline_info(timeline_info_json), self.max_posts, self.since)
+            pager = _Pager(
+                self.extract_timeline_info(timeline_info_json), self.max_posts, self.since, self.until
+            )
             request = _feed_request(self.request_handler, html_content) if not pager.done() else None
             while request and not pager.done():
                 query, lsd = request
@@ -80,6 +88,7 @@ class PagePostInfo:
                 if not pager.done():
                     time.sleep(PAGE_DELAY)
             self.posts = pager.result()
+            self.complete = pager.finished
             return self.posts
         except Exception as exc:
             self.request_handler.error_log.failure("scrape_error", self.url, error=exc)
@@ -96,7 +105,9 @@ class PagePostInfo:
         if not timeline_info_json:
             print("No valid data found for key 'timeline_list_feed_units' in the HTML page.")
             return None
-        pager = _Pager(self.extract_timeline_info(timeline_info_json), self.max_posts, self.since)
+        pager = _Pager(
+            self.extract_timeline_info(timeline_info_json), self.max_posts, self.since, self.until
+        )
         request = _feed_request(self.request_handler, html_content) if not pager.done() else None
         while request and not pager.done():
             query, lsd = request
@@ -109,6 +120,7 @@ class PagePostInfo:
             if not pager.done():
                 await asyncio.sleep(PAGE_DELAY)
         self.posts = pager.result()
+        self.complete = pager.finished
         return self.posts
 
     def _retry_rate_limit(self, query: dict, lsd: str, pager) -> list | None:
@@ -195,6 +207,7 @@ class PagePostInfo:
         max_posts: int | None = 1,
         since: datetime | date | int | float | str | None = None,
         error_log: str | None = None,
+        until: datetime | date | int | float | str | None = None,
     ) -> Optional[List[Dict[str, Optional[str]]]]:
         """
         Class method to directly get page posts information without needing to instantiate the class.
@@ -204,23 +217,25 @@ class PagePostInfo:
             max_posts: Most posts to return. None means every post.
             since: Skip posts older than this.
             error_log: Optional JSON Lines file for failed requests and rate limits.
+            until: Skip posts newer than this. Paging starts here.
 
         Returns:
             list: A list of dictionaries containing posts information, or None if extraction fails.
         """
-        scraper = cls(url, proxy=proxy, max_posts=max_posts, since=since, error_log=error_log)
+        scraper = cls(url, proxy=proxy, max_posts=max_posts, since=since, error_log=error_log, until=until)
         return scraper.scrape()
 
 
 class _Pager:
     """Walks the feed back in time with beforeTime, keeping posts in order and unique."""
 
-    def __init__(self, posts: list, max_posts: int | None, since: int | None):
+    def __init__(self, posts: list, max_posts: int | None, since: int | None, until: int | None = None):
         self.max_posts = max_posts
         self.since = since
+        self.until = until
         self.posts: list = []
         self.seen: set = set()
-        self.before: int | None = None
+        self.before: int | None = until
         self.finished = False
         self._keep(posts)
 
@@ -228,6 +243,8 @@ class _Pager:
         added = 0
         for post in posts:
             created = post.get("creation_time")
+            if self.until is not None and isinstance(created, int) and created > self.until:
+                continue
             if isinstance(created, int):
                 self.before = created if self.before is None else min(self.before, created)
             key = post.get("id") or post.get("url")

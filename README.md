@@ -73,6 +73,7 @@ uv sync --group dev
 | `concurrency` | `4` | **Async list only.** Max pages fetched at once. |
 | `max_posts` | `1` | **Posts only.** Most posts per page, newest first. `1` reads just the page HTML. `None` means every post. |
 | `since` | `None` | **Posts only.** Skip posts older than this `date`, `datetime`, ISO string (`"2026-01-01"`), or unix time. UTC. |
+| `until` | `None` | **Posts only.** Skip posts newer than this, same formats as `since`. Paging starts here, so a run that stopped early can resume from the `creation_time` of its oldest post. |
 | `save_to` | `None` | Optional file path. The result is also written there as UTF-8 JSON. Folders are created. A failed page (`None`) is not written. |
 | `error_log` | `None` | Optional JSON Lines file. Each failed request, rate limit, and retry appends one line. See [Error log](#error-log). |
 
@@ -188,7 +189,7 @@ if __name__ == "__main__":
 
 `FacebookPageScraper.PageInfo(urls)` also accepts a list (sync, one page after another). For many pages, async batch is the better call.
 
-`PagePostInfo` and `PagePostInfoAsync` take the same `url`, `proxy`, `concurrency`, and `save_to` arguments, plus `max_posts` and `since`. A string returns one list of posts. A list of pages returns a list of those lists.
+`PagePostInfo` and `PagePostInfoAsync` take the same `url`, `proxy`, `concurrency`, and `save_to` arguments, plus `max_posts`, `since`, and `until`. A string returns one list of posts. A list of pages returns a list of those lists.
 
 ### Posts
 

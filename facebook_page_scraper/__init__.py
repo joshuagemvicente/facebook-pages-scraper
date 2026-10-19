@@ -95,6 +95,7 @@ class FacebookPageScraper:
         max_posts: int | None = 1,
         since: datetime | date | int | float | str | None = None,
         error_log: str | Path | None = None,
+        until: datetime | date | int | float | str | None = None,
     ):
         """
         Fetches page posts, newest first.
@@ -106,11 +107,14 @@ class FacebookPageScraper:
             max_posts: Most posts per page. 1 reads only the page HTML. None means every post.
             since: Skip posts older than this date, datetime, ISO string, or unix time (UTC).
             error_log: Optional JSON Lines file for failed requests, rate limits, and retries.
+            until: Skip posts newer than this. Paging starts here, so a stopped run can resume.
 
         Returns:
             One list of posts, or a list of those lists when url is a list.
         """
-        options = {"proxy": proxy, "max_posts": max_posts, "since": since, "error_log": error_log}
+        options = {
+            "proxy": proxy, "max_posts": max_posts, "since": since, "error_log": error_log, "until": until
+        }
         if isinstance(url, str):
             result = PagePostInfo.PagePostInfo(url, **options)
         else:
@@ -126,10 +130,11 @@ class FacebookPageScraper:
         max_posts: int | None = 1,
         since: datetime | date | int | float | str | None = None,
         error_log: str | Path | None = None,
+        until: datetime | date | int | float | str | None = None,
     ):
         """Async PagePostInfo. A list fetches up to concurrency pages at once."""
         result = await _many_async(
-            PagePostInfo, url, concurrency, proxy, error_log, max_posts=max_posts, since=since
+            PagePostInfo, url, concurrency, proxy, error_log, max_posts=max_posts, since=since, until=until
         )
         return save_result(result, save_to)
 
