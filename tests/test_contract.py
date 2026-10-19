@@ -7,7 +7,12 @@ from facebook_page_scraper import FacebookPageScraper
 from facebook_page_scraper.page_info import PageInfo
 from facebook_page_scraper import page_post_info
 from facebook_page_scraper.page_post_info import PagePostInfo
-from facebook_page_scraper.request_handler import AsyncRequestHandler, RequestHandler
+from facebook_page_scraper.request_handler import (
+    AsyncRequestHandler,
+    ErrorLog,
+    RequestHandler,
+    _graphql_result,
+)
 from facebook_page_scraper.urls import normalize_url
 
 
@@ -43,6 +48,55 @@ def test_fetch_failure_returns_none(monkeypatch):
     monkeypatch.setattr(handler.session, "get", boom)
     assert handler.fetch_html("https://www.facebook.com/bbcnews") is None
     handler.close()
+
+
+def _log_lines(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_fetch_failure_is_logged_with_traceback(monkeypatch, tmp_path):
+    log = tmp_path / "logs" / "errors.jsonl"
+    handler = RequestHandler(error_log=log)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(handler.session, "get", boom)
+    assert handler.fetch_html("https://www.facebook.com/bbcnews") is None
+    handler.close()
+    [entry] = _log_lines(log)
+    assert entry["kind"] == "request_error"
+    assert (entry["url"], entry["method"]) == ("https://www.facebook.com/bbcnews", "GET")
+    assert (entry["error_type"], entry["error"]) == ("RuntimeError", "down")
+    assert "RuntimeError: down" in entry["traceback"]
+    assert entry["time"].endswith("+00:00")
+
+
+class _Response:
+    status_code = 200
+    headers = {"retry-after": "60", "x-fb-debug": "abc"}
+    text = 'for (;;);{"errors":[{"message":"Rate limit exceeded","code":1675004}]}'
+
+
+def test_rate_limited_response_is_logged_with_headers_and_body(tmp_path):
+    log = tmp_path / "errors.jsonl"
+    lines = _graphql_result(ErrorLog(log), _Response(), {"count": 40, "beforeTime": 99}, "https://www.facebook.com/x")
+    assert lines[0]["errors"][0]["code"] == 1675004
+    [entry] = _log_lines(log)
+    assert entry["kind"] == "rate_limited"
+    assert entry["status"] == 200
+    assert entry["headers"]["retry-after"] == "60"
+    assert "Rate limit exceeded" in entry["body"]
+    assert entry["variables"] == {"count": 40, "beforeTime": 99}
+    assert entry["page"] == "https://www.facebook.com/x"
+
+
+def test_good_response_with_harmless_errors_is_not_logged(tmp_path):
+    log = tmp_path / "errors.jsonl"
+    response = _Response()
+    response.text = '{"data":{"user":{}},"errors":[{"message":"field_exception"}]}'
+    _graphql_result(ErrorLog(log), response, {}, "https://www.facebook.com/x")
+    assert not log.exists()
 
 
 def test_sync_failure_is_none_not_exit(monkeypatch):
@@ -255,7 +309,7 @@ def test_null_relay_bbox_does_not_crash():
 
 def test_save_to_writes_utf8_json(monkeypatch, tmp_path):
     page = {"page_name": "Lungsod ng Cabanatuan", "page_social_accounts": {}}
-    monkeypatch.setattr(PageInfo, "PageInfo", classmethod(lambda cls, url, proxy=None: page))
+    monkeypatch.setattr(PageInfo, "PageInfo", classmethod(lambda cls, url, **_: page))
     path = tmp_path / "out" / "page.json"
     assert FacebookPageScraper.PageInfo("example", save_to=path) == page
     assert json.loads(path.read_text(encoding="utf-8")) == page
@@ -355,6 +409,62 @@ def test_failed_feed_request_keeps_posts_so_far(monkeypatch):
     _fake_feed(monkeypatch, [_story(str(i), 1000 - i) for i in range(5)])
     monkeypatch.setattr(RequestHandler, "post_graphql", lambda *a, **k: None)
     assert [p["id"] for p in FacebookPageScraper.PagePostInfo("example", max_posts=None)] == ["0"]
+
+
+def test_rate_limited_request_is_retried(monkeypatch, tmp_path):
+    timeline = [_story(str(i), 1000 - i) for i in range(95)]
+    _fake_feed(monkeypatch, timeline)
+    serve = RequestHandler.post_graphql
+    rejected = []
+
+    def flaky(self, query, variables, lsd, referer):
+        if len(rejected) < 2:
+            rejected.append(variables)
+            return [{"errors": [{"message": "Rate limit exceeded", "code": 1675004}]}]
+        return serve(self, query, variables, lsd, referer)
+
+    monkeypatch.setattr(RequestHandler, "post_graphql", flaky)
+    monkeypatch.setattr(page_post_info, "RATE_LIMIT_WAITS", (0, 0, 0))
+    log = tmp_path / "errors.jsonl"
+    posts = FacebookPageScraper.PagePostInfo("example", max_posts=None, error_log=log)
+    assert [p["id"] for p in posts] == [p["post_id"] for p in timeline]
+    assert len(rejected) == 2
+    entries = _log_lines(log)
+    assert [e["kind"] for e in entries] == ["rate_limit_retry", "rate_limit_retry", "rate_limit_cleared"]
+    assert [e["attempt"] for e in entries[:2]] == [1, 2]
+    assert entries[-1]["blocked_seconds"] == 0
+
+
+def test_rate_limit_that_never_clears_keeps_posts_so_far(monkeypatch, tmp_path):
+    _fake_feed(monkeypatch, [_story(str(i), 1000 - i) for i in range(5)])
+    limited = [{"errors": [{"message": "Rate limit exceeded", "code": 1675004}]}]
+    monkeypatch.setattr(RequestHandler, "post_graphql", lambda *a, **k: limited)
+    monkeypatch.setattr(page_post_info, "RATE_LIMIT_WAITS", (0, 0))
+    log = tmp_path / "errors.jsonl"
+    posts = FacebookPageScraper.PagePostInfo("example", max_posts=None, error_log=log)
+    assert [p["id"] for p in posts] == ["0"]
+    entries = _log_lines(log)
+    assert [e["kind"] for e in entries] == ["rate_limit_retry", "rate_limit_retry", "rate_limit_gave_up"]
+    assert entries[-1]["posts_so_far"] == 1
+
+
+def test_scrape_crash_is_logged_and_raised(monkeypatch, tmp_path):
+    _fake_feed(monkeypatch, [_story("0", 1000)])
+
+    def broken(self, json_data):
+        raise KeyError("layout changed")
+
+    monkeypatch.setattr(PagePostInfo, "extract_timeline_info", broken)
+    log = tmp_path / "errors.jsonl"
+    try:
+        FacebookPageScraper.PagePostInfo("example", error_log=log)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("expected KeyError")
+    [entry] = _log_lines(log)
+    assert (entry["kind"], entry["error_type"]) == ("scrape_error", "KeyError")
+    assert "layout changed" in entry["traceback"]
 
 
 def test_since_accepts_dates_and_strings():

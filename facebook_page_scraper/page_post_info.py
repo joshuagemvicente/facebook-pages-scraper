@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from typing import List, Optional, Dict
 
 from .facebook_json import relay_results, walk
-from .request_handler import RequestHandler
+from .request_handler import RequestHandler, is_rate_limited
 from .urls import normalize_url
 
 FEED_QUERY = "ProfileCometTimelineFeedQuery"
@@ -15,6 +15,8 @@ FEED_QUERY = "ProfileCometTimelineFeedQuery"
 PAGE_SIZE = 40
 # Pause between feed requests so a long run does not trip rate limits.
 PAGE_DELAY = 1.0
+# Waits before retrying a request Facebook rejected with "Rate limit exceeded".
+RATE_LIMIT_WAITS = (30, 60, 120, 300, 600)
 
 
 class PagePostInfo:
@@ -25,6 +27,7 @@ class PagePostInfo:
         proxy: str | None = None,
         max_posts: int | None = 1,
         since: datetime | date | int | float | str | None = None,
+        error_log: str | None = None,
     ):
         """
         Initializes the PagePostInfo scraper with the given Facebook page URL or username.
@@ -36,10 +39,13 @@ class PagePostInfo:
             max_posts: Most posts to return. 1 reads only the page HTML. None means every post.
             since: Skip posts older than this date, datetime, ISO string, or unix time.
                 A datetime without a timezone is UTC.
+            error_log: Optional JSON Lines file. Each failed request, rate limit, and retry adds a line.
         """
         self.url = normalize_url(url)
         self._owns_handler = handler is None
-        self.request_handler = handler if handler is not None else RequestHandler(proxy=proxy)
+        self.request_handler = (
+            handler if handler is not None else RequestHandler(proxy=proxy, error_log=error_log)
+        )
         self.posts: List[Dict[str, Optional[str]]] = []
         self.max_posts = max_posts
         self.since = _unix(since)
@@ -66,13 +72,18 @@ class PagePostInfo:
             while request and not pager.done():
                 query, lsd = request
                 lines = self.request_handler.post_graphql(query, pager.variables(query), lsd, self.url)
-                if lines is None:
+                if is_rate_limited(lines):
+                    lines = self._retry_rate_limit(query, lsd, pager)
+                if lines is None or is_rate_limited(lines):
                     break
                 pager.add(self.extract_graphql_posts(lines), self.url)
                 if not pager.done():
                     time.sleep(PAGE_DELAY)
             self.posts = pager.result()
             return self.posts
+        except Exception as exc:
+            self.request_handler.error_log.failure("scrape_error", self.url, error=exc)
+            raise
         finally:
             if self._owns_handler:
                 self.request_handler.close()
@@ -90,13 +101,57 @@ class PagePostInfo:
         while request and not pager.done():
             query, lsd = request
             lines = await self.request_handler.post_graphql(query, pager.variables(query), lsd, self.url)
-            if lines is None:
+            if is_rate_limited(lines):
+                lines = await self._retry_rate_limit_async(query, lsd, pager)
+            if lines is None or is_rate_limited(lines):
                 break
             pager.add(self.extract_graphql_posts(lines), self.url)
             if not pager.done():
                 await asyncio.sleep(PAGE_DELAY)
         self.posts = pager.result()
         return self.posts
+
+    def _retry_rate_limit(self, query: dict, lsd: str, pager) -> list | None:
+        """Wait out a rate limit, logging each retry and how long the block lasted."""
+        started = time.monotonic()
+        lines = None
+        for attempt, wait in enumerate(RATE_LIMIT_WAITS, 1):
+            self._log_retry(attempt, wait, started, pager)
+            time.sleep(wait)
+            lines = self.request_handler.post_graphql(query, pager.variables(query), lsd, self.url)
+            if not is_rate_limited(lines):
+                break
+        self._log_rate_limit_end(lines, started, pager)
+        return lines
+
+    async def _retry_rate_limit_async(self, query: dict, lsd: str, pager) -> list | None:
+        started = time.monotonic()
+        lines = None
+        for attempt, wait in enumerate(RATE_LIMIT_WAITS, 1):
+            self._log_retry(attempt, wait, started, pager)
+            await asyncio.sleep(wait)
+            lines = await self.request_handler.post_graphql(query, pager.variables(query), lsd, self.url)
+            if not is_rate_limited(lines):
+                break
+        self._log_rate_limit_end(lines, started, pager)
+        return lines
+
+    def _log_retry(self, attempt: int, wait: int, started: float, pager):
+        print(f"[{self.url}] Rate limited, retrying in {wait}s")
+        self.request_handler.error_log.write(
+            "rate_limit_retry", self.url, attempt=attempt, wait_seconds=wait,
+            blocked_seconds=round(time.monotonic() - started), posts_so_far=len(pager.posts),
+        )
+
+    def _log_rate_limit_end(self, lines, started: float, pager):
+        blocked = round(time.monotonic() - started)
+        if lines is None or is_rate_limited(lines):
+            kind = "rate_limit_gave_up"
+            print(f"[{self.url}] Still rate limited after {blocked}s. Keeping {len(pager.posts)} posts.")
+        else:
+            kind = "rate_limit_cleared"
+            print(f"[{self.url}] Rate limit cleared after {blocked}s")
+        self.request_handler.error_log.write(kind, self.url, blocked_seconds=blocked, posts_so_far=len(pager.posts))
 
     def extract_timeline_info(self, json_data: dict) -> Optional[List[Dict[str, Optional[str]]]]:
         """Posts preloaded in the page HTML. Facebook preloads only the latest one."""
@@ -139,6 +194,7 @@ class PagePostInfo:
         proxy: str | None = None,
         max_posts: int | None = 1,
         since: datetime | date | int | float | str | None = None,
+        error_log: str | None = None,
     ) -> Optional[List[Dict[str, Optional[str]]]]:
         """
         Class method to directly get page posts information without needing to instantiate the class.
@@ -147,11 +203,12 @@ class PagePostInfo:
             url (str): The URL or username of the Facebook page to scrape posts from.
             max_posts: Most posts to return. None means every post.
             since: Skip posts older than this.
+            error_log: Optional JSON Lines file for failed requests and rate limits.
 
         Returns:
             list: A list of dictionaries containing posts information, or None if extraction fails.
         """
-        scraper = cls(url, proxy=proxy, max_posts=max_posts, since=since)
+        scraper = cls(url, proxy=proxy, max_posts=max_posts, since=since, error_log=error_log)
         return scraper.scrape()
 
 

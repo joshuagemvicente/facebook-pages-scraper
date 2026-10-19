@@ -13,14 +13,22 @@ from .storage import save_json, save_result
 __version__ = version("facebook-pages-scraper")
 
 
-async def _many_async(scraper_cls, urls: str | list[str], concurrency: int, proxy: str | None, **options):
+async def _many_async(
+    scraper_cls,
+    urls: str | list[str],
+    concurrency: int,
+    proxy: str | None,
+    error_log: str | Path | None = None,
+    **options,
+):
     async def one(url: str):
         async with semaphore:
-            handler = AsyncRequestHandler(proxy=proxy)
+            handler = AsyncRequestHandler(proxy=proxy, error_log=error_log)
             try:
                 return await scraper_cls(url, handler, **options).scrape_async()
             except Exception as exc:
                 print(f"Error scraping [{url}]: {exc}")
+                handler.error_log.failure("scrape_error", url, error=exc)
                 return None
             finally:
                 await handler.close()
@@ -39,11 +47,16 @@ class FacebookPageScraper:
     proxy is an optional HTTP, HTTPS, or SOCKS URL, for example
     ``http://user:pass@host:port`` or ``socks5://host:port``.
     save_to is an optional file path. The result is also written there as JSON.
+    error_log is an optional JSON Lines file. Each failed request, rate limit,
+    and retry adds one line with the time, status, headers, body, and error.
     """
 
     @staticmethod
     def PageInfo(
-        url: str | list[str], proxy: str | None = None, save_to: str | Path | None = None
+        url: str | list[str],
+        proxy: str | None = None,
+        save_to: str | Path | None = None,
+        error_log: str | Path | None = None,
     ):
         """
         Fetches general page information.
@@ -52,14 +65,15 @@ class FacebookPageScraper:
             url: One page URL or username, or a list of them.
             proxy: Optional HTTP, HTTPS, or SOCKS proxy URL.
             save_to: Optional JSON file path for the result.
+            error_log: Optional JSON Lines file for failed requests.
 
         Returns:
             One dict, or a list of dicts when url is a list. A failed page is None.
         """
         if isinstance(url, str):
-            result = PageInfo.PageInfo(url, proxy=proxy)
+            result = PageInfo.PageInfo(url, proxy=proxy, error_log=error_log)
         else:
-            result = [PageInfo.PageInfo(item, proxy=proxy) for item in url]
+            result = [PageInfo.PageInfo(item, proxy=proxy, error_log=error_log) for item in url]
         return save_result(result, save_to)
 
     @staticmethod
@@ -68,9 +82,10 @@ class FacebookPageScraper:
         concurrency: int = 4,
         proxy: str | None = None,
         save_to: str | Path | None = None,
+        error_log: str | Path | None = None,
     ):
         """Async PageInfo. A list fetches up to concurrency pages at once."""
-        return save_result(await _many_async(PageInfo, url, concurrency, proxy), save_to)
+        return save_result(await _many_async(PageInfo, url, concurrency, proxy, error_log), save_to)
 
     @staticmethod
     def PagePostInfo(
@@ -79,6 +94,7 @@ class FacebookPageScraper:
         save_to: str | Path | None = None,
         max_posts: int | None = 1,
         since: datetime | date | int | float | str | None = None,
+        error_log: str | Path | None = None,
     ):
         """
         Fetches page posts, newest first.
@@ -89,11 +105,12 @@ class FacebookPageScraper:
             save_to: Optional JSON file path for the result.
             max_posts: Most posts per page. 1 reads only the page HTML. None means every post.
             since: Skip posts older than this date, datetime, ISO string, or unix time (UTC).
+            error_log: Optional JSON Lines file for failed requests, rate limits, and retries.
 
         Returns:
             One list of posts, or a list of those lists when url is a list.
         """
-        options = {"proxy": proxy, "max_posts": max_posts, "since": since}
+        options = {"proxy": proxy, "max_posts": max_posts, "since": since, "error_log": error_log}
         if isinstance(url, str):
             result = PagePostInfo.PagePostInfo(url, **options)
         else:
@@ -108,10 +125,11 @@ class FacebookPageScraper:
         save_to: str | Path | None = None,
         max_posts: int | None = 1,
         since: datetime | date | int | float | str | None = None,
+        error_log: str | Path | None = None,
     ):
         """Async PagePostInfo. A list fetches up to concurrency pages at once."""
         result = await _many_async(
-            PagePostInfo, url, concurrency, proxy, max_posts=max_posts, since=since
+            PagePostInfo, url, concurrency, proxy, error_log, max_posts=max_posts, since=since
         )
         return save_result(result, save_to)
 

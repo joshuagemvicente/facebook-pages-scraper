@@ -24,7 +24,7 @@ def _dict(value):
 
 
 class PageInfo:
-    def __init__(self, url: str, handler=None, proxy: str | None = None):
+    def __init__(self, url: str, handler=None, proxy: str | None = None, error_log: str | None = None):
         """
         Initializes the PageInfo scraper with the given Facebook page URL or username.
 
@@ -32,10 +32,13 @@ class PageInfo:
             url (str): The URL or username of the Facebook page to scrape.
             proxy: Optional HTTP, HTTPS, or SOCKS proxy URL.
                 Examples: ``http://user:pass@host:port``, ``socks5://host:port``.
+            error_log: Optional JSON Lines file. Each failed request adds a line.
         """
         self.url = normalize_url(url)
         self._owns_handler = handler is None
-        self.request_handler = handler if handler is not None else RequestHandler(proxy=proxy)
+        self.request_handler = (
+            handler if handler is not None else RequestHandler(proxy=proxy, error_log=error_log)
+        )
         self.general_info: Dict[str, Optional[str]] = {}
         self.profile_info: Dict[str, Optional[str]] = {}
 
@@ -53,6 +56,9 @@ class PageInfo:
         """
         try:
             return self._scrape()
+        except Exception as exc:
+            self.request_handler.error_log.failure("scrape_error", self.url, error=exc)
+            raise
         finally:
             if self._owns_handler:
                 self.request_handler.close()
@@ -334,15 +340,18 @@ class PageInfo:
             return meta_data
 
     @classmethod
-    def PageInfo(cls, url: str, proxy: str | None = None) -> Optional[Dict[str, Optional[str]]]:
+    def PageInfo(
+        cls, url: str, proxy: str | None = None, error_log: str | None = None
+    ) -> Optional[Dict[str, Optional[str]]]:
         """
         Class method to directly get page information without needing to instantiate the class.
 
         Args:
             url (str): The URL or username of the Facebook page to scrape.
             proxy: Optional HTTP, HTTPS, or SOCKS proxy URL.
+            error_log: Optional JSON Lines file for failed requests.
 
         Returns:
             dict: A combined dictionary with general and profile page information, or None if extraction fails.
         """
-        return cls(url, proxy=proxy).scrape()
+        return cls(url, proxy=proxy, error_log=error_log).scrape()

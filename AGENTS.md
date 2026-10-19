@@ -35,6 +35,7 @@
 - Address looks doubled (city or postal code repeated): that string is what the About field title contains. Do not trim it unless the HTML itself has a cleaner field.
 - Social map is `{}` when there is no other-account card. It is never `None`.
 - Post `medias` empty on a single photo: read `photo_image`, not only `all_subattachments`.
+- Paging stopped early with no error: check for `Rate limit exceeded` (code `1675004`, HTTP 200). The pager retries on `RATE_LIMIT_WAITS`, then keeps the posts so far. Pass `error_log=` to get JSON Lines with time, status, headers, body, and `blocked_seconds` for each retry. On 2026-10-17, requests 1–2 s apart tripped it, while 76 requests 5 s apart did not.
 - Only one post: expected with the default `max_posts=1`. With more requested, check the log for `Timeline query or LSD token not found` (preloader missing from the HTML) or a failed POST. The doc id must keep coming from the HTML preloader, never hard-coded.
 - `AttributeError` on `title.text`: an intro card has `"title": null` because `.get("title", {})` returns `None` when the key is present. Keep the null-safe title read.
 - Windows console `UnicodeEncodeError`: post text can be non-cp1252. Print ids and lengths, not the raw text.

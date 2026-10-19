@@ -74,6 +74,7 @@ uv sync --group dev
 | `max_posts` | `1` | **Posts only.** Most posts per page, newest first. `1` reads just the page HTML. `None` means every post. |
 | `since` | `None` | **Posts only.** Skip posts older than this `date`, `datetime`, ISO string (`"2026-01-01"`), or unix time. UTC. |
 | `save_to` | `None` | Optional file path. The result is also written there as UTF-8 JSON. Folders are created. A failed page (`None`) is not written. |
+| `error_log` | `None` | Optional JSON Lines file. Each failed request, rate limit, and retry appends one line. See [Error log](#error-log). |
 
 `proxy` stays `None` unless you need one. Examples:
 
@@ -209,6 +210,8 @@ FacebookPageScraper.PagePostInfo(
 
 Each request returns up to 40 posts and takes about 4 MB, with a 1 second pause between requests. A page with years of daily posts can mean hundreds of requests, so set `since` or `max_posts` unless you need the full history. If a request fails partway, you get the posts collected so far. A shared post with no caption of its own has `text: null`.
 
+Facebook sometimes answers a feed request with `Rate limit exceeded` (error code `1675004`, HTTP 200). The scraper waits 30 s, 60 s, 2 min, 5 min, then 10 min, retrying after each wait. If the limit is still there, it stops and returns the posts collected so far.
+
 ### Save to a file
 
 Pass `save_to` to any call. The result is still returned.
@@ -221,6 +224,33 @@ FacebookPageScraper.PagePostInfo("lgucabanatuan", save_to="output/lgucabanatuan/
 ```
 
 A list of pages saves one JSON array in input order, with `null` for a failed page. Image links in the saved file are signed by Facebook and expire after a few days.
+
+### Error log
+
+Pass `error_log` to any call to keep a record of what went wrong. Each event appends one JSON object per line. Folders are created.
+
+```python
+FacebookPageScraper.PagePostInfo(
+    "lgucabanatuan", max_posts=None, since="2025-01-01",
+    error_log="output/lgucabanatuan/errors.jsonl",
+)
+```
+
+Every line has `time` (UTC, milliseconds), `kind`, and `url`. Request failures also carry the response `status`, `headers`, and `body` (first 4000 characters) when there was a response. Exceptions add `error_type`, `error`, and `traceback`. Feed requests add `page` and the request `variables` (`count`, `beforeTime`).
+
+| `kind` | When |
+| --- | --- |
+| `request_error` | No response: network, DNS, TLS, proxy, or timeout. |
+| `http_error` | Status 400 or higher. |
+| `bad_response` | A response came back but could not be read. |
+| `rate_limited` | The feed answered `Rate limit exceeded`. Includes the `errors` list. |
+| `graphql_error` | The feed answered with errors and no data. Includes the `errors` list. |
+| `rate_limit_retry` | About to wait and retry. `attempt`, `wait_seconds`, `blocked_seconds` so far, `posts_so_far`. |
+| `rate_limit_cleared` | A retry worked. `blocked_seconds` is how long the limit lasted. |
+| `rate_limit_gave_up` | Still limited after the last wait. The posts so far are returned. |
+| `scrape_error` | An unexpected exception inside a scrape. A sync call still raises it; an async call returns `None` for that page. |
+
+The log never includes the proxy URL. Good responses that carry Facebook's harmless `save_info` field error are not logged.
 
 ## Disclaimer
 
